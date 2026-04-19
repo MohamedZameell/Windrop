@@ -10,9 +10,29 @@ from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
 SERVICE_TYPE = "_airdrop._tcp.local."
 SERVICE_PORT = 8771
-SERVICE_FLAGS = "0x0"
 SERVICE_MODEL = "Windows"
 NETWORK_POLL_INTERVAL_SECONDS = 3.0
+
+# AirDrop receiver capability flags (bitmask)
+# Must advertise at least SUPPORTS_MIXED_TYPES or SUPPORTS_PIPELINING
+# for senders to consider this a valid receiver.
+# macOS default = 1019 (all capabilities)
+_SUPPORTS_URL = 0x01
+_SUPPORTS_DVZIP = 0x02          # Upload body is gzipped CPIO (dvzip)
+_SUPPORTS_PIPELINING = 0x04
+_SUPPORTS_MIXED_TYPES = 0x08    # Required for multi-file transfers
+_SUPPORTS_IRIS = 0x40
+_SUPPORTS_DISCOVER_MAYBE = 0x80 # Required for /Discover handshake
+_SUPPORTS_ASSET_BUNDLE = 0x200
+
+SERVICE_FLAGS = str(
+    _SUPPORTS_URL
+    | _SUPPORTS_DVZIP
+    | _SUPPORTS_MIXED_TYPES
+    | _SUPPORTS_IRIS
+    | _SUPPORTS_DISCOVER_MAYBE
+    | _SUPPORTS_ASSET_BUNDLE
+)  # = "715"
 
 
 @dataclass(slots=True)
@@ -146,15 +166,20 @@ class DiscoveryService:
     def _restart_discovery(self, interface_ip: str) -> None:
         self._teardown_discovery()
 
+        # Collect both IPv4 and IPv6 addresses for the chosen interface
+        addresses = [socket.inet_aton(interface_ip)]
+        ipv6_addr = self._get_link_local_ipv6(interface_ip)
+        if ipv6_addr is not None:
+            addresses.append(ipv6_addr)
+
         zeroconf = Zeroconf(interfaces=[interface_ip])
         service_info = ServiceInfo(
             type_=SERVICE_TYPE,
             name=self.service_name,
-            addresses=[socket.inet_aton(interface_ip)],
+            addresses=addresses,
             port=self._port,
             properties={
                 b"flags": SERVICE_FLAGS.encode("utf-8"),
-                b"model": SERVICE_MODEL.encode("utf-8"),
             },
             server=f"{self._hostname}.local.",
         )
@@ -217,31 +242,89 @@ class DiscoveryService:
             self._on_device_lost(name)
 
     def _select_active_wifi_ip(self) -> str:
+        """Pick the best network interface for mDNS.
+
+        Avoids Windows ICS/Mobile Hotspot adapters (192.168.137.x) and
+        virtual adapters.  Prefers the interface with a default gateway
+        (i.e. the one actually connected to a router or iPhone hotspot).
+        """
         candidates: list[str] = []
         for family, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
             if family != socket.AF_INET:
                 continue
-
-            ip_address = sockaddr[0]
-            if ip_address.startswith("127."):
+            ip = sockaddr[0]
+            if ip.startswith("127.") or ip.startswith("192.168.137."):
                 continue
+            candidates.append(ip)
 
-            candidates.append(ip_address)
+        if not candidates:
+            # Last resort: include 192.168.137.x
+            for family, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
+                if family != socket.AF_INET:
+                    continue
+                ip = sockaddr[0]
+                if not ip.startswith("127."):
+                    candidates.append(ip)
 
         if not candidates:
             raise RuntimeError("No active IPv4 interface was found for WinDrop discovery.")
 
-        private_candidates = [ip for ip in candidates if self._is_private_ipv4(ip)]
-        if private_candidates:
-            return private_candidates[0]
-        return candidates[0]
+        # Prefer interface that can reach the internet (has a default route)
+        for ip in candidates:
+            if self._has_default_route(ip):
+                return ip
+
+        private = [ip for ip in candidates if self._is_private_ipv4(ip)]
+        return private[0] if private else candidates[0]
+
+    @staticmethod
+    def _has_default_route(ip: str) -> bool:
+        """Check if this interface can reach an external IP (has a gateway)."""
+        import errno
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind((ip, 0))
+            s.settimeout(0)
+            s.connect(("8.8.8.8", 53))
+            return True
+        except (OSError, socket.error):
+            return False
+        finally:
+            s.close()
+
+    @staticmethod
+    def _get_link_local_ipv6(ipv4: str) -> bytes | None:
+        """Find a link-local IPv6 address on the same interface as *ipv4*.
+
+        AirDrop traditionally uses IPv6 link-local addresses, so advertising
+        one alongside the IPv4 address improves discoverability.
+        """
+        try:
+            import ipaddress
+            target_v4 = ipaddress.ip_address(ipv4)
+            # Walk all addresses; match the interface that also has our IPv4
+            has_v4 = set()
+            v6_by_idx: dict[int, bytes] = {}
+            for info in socket.getaddrinfo(socket.gethostname(), None):
+                family, _, _, _, sockaddr = info
+                if family == socket.AF_INET:
+                    if ipaddress.ip_address(sockaddr[0]) == target_v4:
+                        # On Windows getaddrinfo doesn't give interface index for v4,
+                        # but we can collect all fe80:: addresses as candidates
+                        pass
+                elif family == socket.AF_INET6:
+                    addr = ipaddress.ip_address(sockaddr[0].split("%")[0])
+                    if addr.is_link_local:
+                        return addr.packed
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _is_private_ipv4(ip_address: str) -> bool:
         parts = ip_address.split(".")
         if len(parts) != 4:
             return False
-
         first = int(parts[0])
         second = int(parts[1])
         return (

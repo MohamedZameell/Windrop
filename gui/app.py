@@ -490,6 +490,12 @@ class WinDropApp:
             self._set_status("Select files and a device to continue")
             return
 
+        target_ip = str(device.get("ip", "")).strip()
+        if not target_ip:
+            self._set_status("No IP — tap the device to establish a P2P link first")
+            self.logger.warning("Send blocked: device %s has no IP", device.get("name"))
+            return
+
         self._send_in_progress = True
         self._send_target_name = str(device["name"])
         self.send_panel.start_send()
@@ -497,7 +503,7 @@ class WinDropApp:
 
         self._send_thread = threading.Thread(
             target=self._run_send_worker,
-            args=(str(device["ip"]), int(device["port"]), files),
+            args=(target_ip, int(device["port"]), files),
             name="WinDropSendWorker",
             daemon=True,
         )
