@@ -6,6 +6,17 @@ WinDrop is a research prototype that attempted to bring true AirDrop-style file 
 
 This repository is being kept as a documented prototype and reference point, not as a finished working product.
 
+## Attribution
+
+This project was completely vibecoded.
+
+The repository work was done with:
+
+- Claude Opus 4.6 on high
+- GPT-5.4 on medium
+
+Credit for the implementation work in this repository goes to Claude and GPT.
+
 ## Why It Cannot Be Done Right Now
 
 The short version is that the missing piece is not the Python GUI, not the packaging, and not the HTTP endpoints. The real blocker is the transport layer that Apple devices expect and the public APIs that Windows does not expose.
