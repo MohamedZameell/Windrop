@@ -31,8 +31,9 @@ FILE_TYPE_MAP = {
 
 
 def _make_ssl_context() -> ssl.SSLContext:
-    """SSL context that skips certificate verification (AirDrop uses self-signed certs)."""
-    ctx = ssl.create_default_context()
+    """TLSv1.3 SSL context that skips cert verification (matches Google Mosey)."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
@@ -55,6 +56,24 @@ class Sender:
         self._on_error = callback
 
     async def send_files(self, target_ip: str, target_port: int, file_paths: list[str]) -> bool:
+        if not target_ip:
+            for path in file_paths:
+                await self._invoke_callback(
+                    self._on_error, Path(path).name, "No target IP — cannot send"
+                )
+            return False
+
+        # Quick TCP reachability check before starting the full AirDrop flow
+        reachable = await self._check_reachable(target_ip, target_port)
+        if not reachable:
+            for path in file_paths:
+                await self._invoke_callback(
+                    self._on_error,
+                    Path(path).name,
+                    f"Cannot reach {target_ip}:{target_port} — are both devices on the same network?",
+                )
+            return False
+
         files = [Path(path) for path in file_paths]
         connector = aiohttp.TCPConnector(ssl=_make_ssl_context())
 
@@ -83,7 +102,7 @@ class Sender:
         target_ip: str,
         target_port: int,
     ) -> bool:
-        url = f"https://{target_ip}:{target_port}/Discover"
+        url = self._build_url(target_ip, target_port, "/Discover")
         payload = plistlib.dumps(
             {
                 "SenderComputerName": socket.gethostname(),
@@ -96,7 +115,14 @@ class Sender:
             async with session.post(
                 url,
                 data=payload,
-                headers={"Content-Type": "application/octet-stream"},
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Connection": "close",
+                    "Accept": "*/*",
+                    "User-Agent": "AirDrop/1.0",
+                    "Accept-Language": "en-us",
+                    "Accept-Encoding": "br, gzip, deflate",
+                },
                 timeout=aiohttp.ClientTimeout(total=DISCOVER_TIMEOUT_SECONDS),
             ) as response:
                 return response.status == 200
@@ -116,13 +142,20 @@ class Sender:
     ) -> bool:
         payload = self._build_ask_payload(files)
         ask_timeout = aiohttp.ClientTimeout(total=ASK_TIMEOUT_SECONDS)
-        url = f"https://{target_ip}:{target_port}/Ask"
+        url = self._build_url(target_ip, target_port, "/Ask")
 
         try:
             async with session.post(
                 url,
                 data=plistlib.dumps(payload, fmt=plistlib.FMT_BINARY),
-                headers={"Content-Type": "application/octet-stream"},
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Connection": "close",
+                    "Accept": "*/*",
+                    "User-Agent": "AirDrop/1.0",
+                    "Accept-Language": "en-us",
+                    "Accept-Encoding": "br, gzip, deflate",
+                },
                 timeout=ask_timeout,
             ) as response:
                 if response.status == 200:
@@ -160,7 +193,7 @@ class Sender:
         target_port: int,
         files: list[Path],
     ) -> bool:
-        url = f"https://{target_ip}:{target_port}/Upload"
+        url = self._build_url(target_ip, target_port, "/Upload")
         archive_data = create_cpio_gzip([(f.name, f) for f in files])
         total_bytes = len(archive_data)
         label = files[0].name if files else "upload"
@@ -172,8 +205,11 @@ class Sender:
                 url,
                 data=archive_data,
                 headers={
-                    "Content-Type": "application/octet-stream",
-                    "Content-Length": str(total_bytes),
+                    "Content-Type": "application/x-dvzip",
+                    "Connection": "keep-alive",
+                    "User-Agent": "AirDrop/1.0",
+                    "TotalBytes": str(total_bytes),
+                    "Accept-Encoding": "identity",
                 },
                 timeout=aiohttp.ClientTimeout(total=UPLOAD_TIMEOUT_SECONDS),
             ) as response:
@@ -221,6 +257,29 @@ class Sender:
                 for file_path in files
             ],
         }
+
+    @staticmethod
+    async def _check_reachable(ip: str, port: int, timeout: float = 3.0) -> bool:
+        """Quick TCP connect to verify the target is reachable."""
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port, ssl=_make_ssl_context()),
+                timeout=timeout,
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _build_url(ip: str, port: int, path: str) -> str:
+        """Build HTTPS URL, wrapping IPv6 addresses in brackets."""
+        if ":" in ip:
+            # IPv6 — strip zone ID (%) and wrap in brackets
+            clean_ip = ip.split("%")[0]
+            return f"https://[{clean_ip}]:{port}{path}"
+        return f"https://{ip}:{port}{path}"
 
     def _detect_file_type(self, file_path: Path) -> str:
         return FILE_TYPE_MAP.get(file_path.suffix.lower(), "public.data")

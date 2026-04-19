@@ -68,6 +68,7 @@ class WiFiDirectManager:
 
         # Track discovered Apple devices: {device_id: device_name}
         self._discovered_devices: dict[str, str] = {}
+        self._use_general_watcher = False  # True when fallback unfiltered watcher is used
 
     @property
     def local_ip(self) -> str | None:
@@ -313,15 +314,21 @@ class WiFiDirectManager:
     # ------------------------------------------------------------------
 
     def _start_watcher(self) -> None:
-        """Watch for nearby devices (general enumeration to find Apple hardware)."""
-        # General watcher finds Apple devices connected or nearby
+        """Watch for nearby Wi-Fi Direct peers.
+
+        Python WinRT 3.x only exposes the no-arg create_watcher() overload, so
+        we must use the general device watcher and filter results ourselves to
+        reject USB-enumerated devices.
+        """
+        self._use_general_watcher = True
         self._watcher = _de.DeviceInformation.create_watcher()
+
         self._watcher.add_added(self._on_device_added)
         self._watcher.add_updated(self._on_device_updated)
         self._watcher.add_removed(self._on_device_removed)
         self._watcher.add_enumeration_completed(self._on_enum_completed)
         self._watcher.start()
-        self._logger.info("Device watcher started (scanning for Apple devices)")
+        self._logger.info("Device watcher started (filtered general watcher)")
 
     def _stop_watcher(self) -> None:
         if self._watcher is not None:
@@ -340,12 +347,18 @@ class WiFiDirectManager:
     def _on_device_added(self, sender, device_info) -> None:
         name = device_info.name or ""
         dev_id = device_info.id or ""
+
+        # When using the unfiltered general watcher, reject USB device IDs
+        # USB IDs look like: \\?\USB#VID_05AC&PID_12A8#...
+        if self._use_general_watcher and ("\\\\?\\USB#" in dev_id or "USB#VID_" in dev_id):
+            return
+
         if self._is_airdrop_candidate(name, device_info):
             # Deduplicate by name (multiple entries for same device are common)
             if name not in self._discovered_devices.values():
                 self._discovered_devices[dev_id] = name
                 self._logger.info(
-                    "Wi-Fi Direct Apple device found: %s (id=%s)", name, dev_id[:60]
+                    "Wi-Fi Direct peer found: %s (id=%s)", name, dev_id[:60]
                 )
                 self._on_device_found(name, dev_id)
 

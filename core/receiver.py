@@ -207,10 +207,15 @@ class ReceiverServer:
         try:
             body = await request.read()
             if body:
-                plistlib.loads(body)
+                sender_info = plistlib.loads(body)
+                self._logger.info(
+                    "Discover from: %s",
+                    sender_info.get("SenderComputerName", "unknown"),
+                )
         except Exception:
             pass
 
+        # Match OpenDrop format — only standard AirDrop fields
         response_data = plistlib.dumps(
             {
                 "ReceiverComputerName": self._receiver_name,
@@ -249,7 +254,13 @@ class ReceiverServer:
 
         if accepted:
             return web.Response(
-                body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY),
+                body=plistlib.dumps(
+                    {
+                        "ReceiverModelName": self._receiver_model,
+                        "ReceiverComputerName": self._receiver_name,
+                    },
+                    fmt=plistlib.FMT_BINARY,
+                ),
                 status=200,
                 content_type="application/octet-stream",
             )
@@ -262,7 +273,8 @@ class ReceiverServer:
         if "multipart" in content_type:
             return await self._handle_upload_multipart(request)
 
-        # Standard AirDrop: raw body (gzipped CPIO archive or single file)
+        # AirDrop upload: body is gzipped CPIO archive
+        # Content-Type may be application/octet-stream or application/x-dvzip
         body = await request.read()
         if not body:
             return web.Response(status=400)
@@ -337,6 +349,7 @@ class ReceiverServer:
 
     def _build_ssl_context(self) -> ssl.SSLContext:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_context.load_cert_chain(certfile=get_cert_path(), keyfile=get_key_path())
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE

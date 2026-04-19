@@ -10,9 +10,10 @@ from bleak.exc import BleakError
 
 from windrop.utils.logger import get_logger
 
-APPLE_COMPANY_ID = 0x004C
+APPLE_COMPANY_ID = 0x004C  # 76 decimal — same as Google Mosey uses
+AIRDROP_SERVICE_UUID = "0000fcf1-0000-1000-8000-00805f9b34fb"
 AIRDROP_MANUFACTURER_PAYLOAD = bytes([
-    0x05, 0x12,                          # Type: AirDrop, Length: 18 bytes
+    0x05, 0x12,                          # Type: AirDrop (5), Length: 18 bytes
     0x00, 0x00,                          # Version, flags
     0x00, 0x00, 0x00, 0x00,              # Contact hash (phone)
     0x00, 0x00, 0x00, 0x00,              # Contact hash (email)
@@ -177,7 +178,13 @@ def _configure_advertisement_payload(publisher: Any, payload: bytes) -> None:
     from winrt.windows.devices.bluetooth.advertisement import BluetoothLEManufacturerData
     from winrt.windows.storage.streams import DataWriter
 
+    # Manufacturer data: Apple company ID + AirDrop beacon (matches Google Mosey format)
     writer = DataWriter()
     writer.write_bytes(payload)
     manufacturer_data = BluetoothLEManufacturerData(APPLE_COMPANY_ID, writer.detach_buffer())
     publisher.advertisement.manufacturer_data.append(manufacturer_data)
+
+    # Note: Windows BLE publisher can't combine manufacturer data + service UUIDs.
+    # The Apple manufacturer data (company ID 0x4C + AirDrop beacon) is sufficient
+    # for iPhone discovery. Google Mosey also uses the FCF1 service UUID, but on
+    # Android the BLE stack supports both simultaneously.
