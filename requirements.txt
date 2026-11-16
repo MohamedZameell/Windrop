@@ -4,7 +4,7 @@ darkdetect==0.8.0
 packaging==24.2
 pillow==12.1.1
 bleak==3.0.1
-aiohttp==3.13.5
+aiohttp==3.14.4
 pystray==0.19.5
 pywin32==311
 tkinterdnd2==0.4.3
